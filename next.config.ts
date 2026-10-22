@@ -12,6 +12,12 @@ const nextConfig: NextConfig = {
       },
     },
   },
+  serverExternalPackages: [
+    "@mastra/duckdb",
+    "@duckdb/node-api",
+    "@duckdb/node-bindings",
+    "duckdb",
+  ],
 };
 
 export default nextConfig;
