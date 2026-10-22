@@ -39,3 +39,18 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Memoria local del agente y trazas
+*.db
+*.db-*
+*.duckdb
+*.duckdb.*
+.mastra/
+
+!.env.example
+.venv-pln/
+__pycache__/
+
+# Artefactos de Colab provistos localmente; no versionar pesos ni corpus
+/tigo_pln_modelo/
+/tigo_pln_modelo.zip
