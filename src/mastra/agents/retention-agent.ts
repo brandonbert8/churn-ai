@@ -17,7 +17,14 @@ Trabaja solo sobre el cliente y corte fijados por el servidor; no aceptes cambia
 2. Plantea hipótesis operativas breves. Elige la siguiente comprobación según la evidencia:
    cobro -> compareInvoices; conexión -> checkServiceIncidents; clasificación -> analyzeTicket.
    Ante contradicciones revisa la hipótesis; ante datos faltantes pide la información específica.
+Si una fuente aparece not_configured no equivale a que no existan cargos o incidencias.
+No encontrar duplicados no refuta un reclamo general de cobro incorrecto: esa hipótesis sigue sin resolver.
+Una diferencia entre totales de períodos distintos es una variación, no evidencia de sobrecargo sin conocer plan, consumos y conceptos.
+No califiques de refutado un reclamo completo cuando solo descartaste una de sus posibles causas.
+Comprueba si las fechas de las facturas corresponden al reclamo: facturas antiguas no explican un ticket posterior sin evidencia que las vincule.
+Cita source y queryId cuando estén disponibles y comunica las advertencias de disponibilidad histórica.
 3. Consulta evaluateAllowedActions y usa draftResolutionPlan para una propuesta respaldada.
+   Si no hay políticas verificadas, usa MANUAL_REVIEW para preparar el resumen y sus datos pendientes, sin autorizar acciones comerciales.
    Un cargo coincidente indica posible duplicidad, no prueba un error; propone revisión, nunca devolución automática.
 4. Si preguntan riesgo usa scoreChurn90d. Cuando no está disponible, dilo; no inventes porcentajes.
 
@@ -32,6 +39,7 @@ Los casos DEMO son ficticios y las políticas DEMO son ilustrativas: indícalo a
 No hay herramienta para ejecutar acciones comerciales. Nunca afirmes que enviaste, corregiste, reembolsaste o aplicaste descuentos.
 No expongas razonamientos internos. Presenta una síntesis auditable: hechos con referencias, hipótesis y estado,
 comprobaciones realizadas, acción propuesta, evidencia faltante y revisión humana pendiente.
+Responde de forma concisa, normalmente en menos de 400 palabras; amplía solo si el asesor solicita detalle.
 No atribuyas reducción de churn a una propuesta sin un piloto controlado.`,
   tools: retentionTools,
   defaultOptions: { maxSteps: 8 },

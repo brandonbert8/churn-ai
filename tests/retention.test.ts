@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { RequestContext } from '@mastra/core/request-context'
 import { demoSnapshot, DEMO_CUTOFF } from '../src/mastra/retention/demo'
-import { atCutoff, allowedActions, compareCharges, RetentionCase } from '../src/mastra/retention/service'
+import { atCutoff, allowedActions, compareCharges, RetentionCase, evidenceRequest, DataSourceError } from '../src/mastra/retention/service'
 import { plnSchema } from '../src/mastra/retention/contracts'
 import { activeCase, draftResolutionPlan } from '../src/mastra/tools/retention-tools'
 
@@ -93,4 +93,35 @@ test('live gateway rejects another customer instead of falling back to demo', as
   process.env.CHURN_EVIDENCE_API_URL = 'https://evidence.example.invalid/'
   const fetcher: typeof fetch = async () => Response.json(demoSnapshot('DEMO-002'))
   await assert.rejects(new RetentionCase(scope, fetcher).load(), /fuera del alcance/)
+})
+
+
+test('live snapshots preserve source, query and missing-source metadata', async () => {
+  process.env.CHURN_DATA_MODE = 'live'
+  process.env.CHURN_EVIDENCE_API_URL = 'https://evidence.example.invalid/'
+  const payload = { ...demoSnapshot('DEMO-001')!, invoices: [], incidents: [], policies: [],
+    source: 'DBT.BRONCE.STG_SOPORTE_TICKETS', queryId: 'query-unit-test',
+    warnings: ['Disponibilidad histórica no verificada'],
+    availability: { tickets: 'available', invoices: 'not_configured', incidents: 'not_configured', policies: 'not_configured' },
+  }
+  const fetcher: typeof fetch = async () => Response.json(payload)
+  const current = new RetentionCase(scope, fetcher)
+  const snapshot = await current.load()
+  assert.equal(snapshot.queryId, 'query-unit-test')
+  assert.equal(snapshot.warnings?.length, 1)
+  assert.equal(compareCharges(snapshot).status, 'not_configured')
+  const context = { requestContext: new RequestContext(), observe: { span: async <T>(_name: string, fn: () => T | Promise<T>) => fn(), log: () => {} } }
+  context.requestContext.set('retentionCase', current)
+  const plan = await draftResolutionPlan.execute!({ action: 'MANUAL_REVIEW', hypotheses: [{ description: 'Requiere investigación adicional', status: 'unresolved', evidenceIds: ['DEMO-001-T1'] }] }, context)
+  assert.ok(plan && typeof plan === 'object' && 'status' in plan && 'executed' in plan)
+  assert.equal(plan.status, 'pending-policy-validation')
+  assert.equal(plan.executed, false)
+})
+
+test('only sanitized gateway configuration errors reach the UI', async () => {
+  process.env.CHURN_EVIDENCE_API_URL = 'https://evidence.example.invalid/'
+  const known: typeof fetch = async () => Response.json({ detail: { code: 'MISSING_DRIVER', message: 'Instala el conector de Snowflake.' } }, { status: 503 })
+  await assert.rejects(evidenceRequest('customers', undefined, undefined, known), (error: unknown) => error instanceof DataSourceError && error.message === 'Instala el conector de Snowflake.' && error.status === 503)
+  const unknown: typeof fetch = async () => Response.json({ detail: { code: 'UNEXPECTED', message: 'private connection details' } }, { status: 500 })
+  await assert.rejects(evidenceRequest('customers', undefined, undefined, unknown), (error: unknown) => error instanceof DataSourceError && !error.message.includes('private'))
 })

@@ -1,0 +1,2 @@
+# Official connector; installed in the same .venv-pln environment.
+snowflake-connector-python>=3.12,<6

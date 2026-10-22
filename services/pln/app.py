@@ -13,7 +13,9 @@ import unicodedata
 import joblib
 import numpy as np
 from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, AwareDatetime
+from fastapi import Query
+from services.pln import snowflake_data
 
 
 def clean_text(value):
@@ -34,7 +36,7 @@ def clean_text(value):
 import __main__  # noqa: E402
 __main__.clean_text = clean_text
 
-MODEL_DIR = Path(os.environ.get("PLN_MODEL_DIR", ".mastra/models/tigo")).resolve()
+MODEL_DIR = Path(os.environ.get("PLN_MODEL_DIR", "tigo_pln_modelo")).resolve()
 manifest = json.loads((MODEL_DIR / "manifest.json").read_text())
 labels = json.loads((MODEL_DIR / "labels.json").read_text())
 # Only load this project export: joblib files must never be accepted as uploads.
@@ -73,7 +75,8 @@ def load_beto():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "modelVersion": version, "productionReady": False}
+    return {"status": "ok", "modelVersion": version, "productionReady": False,
+            "modelDirectory": MODEL_DIR.name, "snowflake": snowflake_data.configuration_status()}
 
 
 @app.post("/analyze")
@@ -114,3 +117,40 @@ def analyze(payload: AnalyzeRequest, authorization: str | None = Header(default=
                 "vector": vector.tolist(),
             }
     return result
+
+
+class CaseRequest(BaseModel):
+    customerId: str = Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")
+    cutoff: AwareDatetime
+
+
+def check_evidence_access(authorization):
+    token = os.environ.get("CHURN_EVIDENCE_API_TOKEN")
+    if not token or not secrets.compare_digest(authorization or "", f"Bearer {token}"):
+        raise HTTPException(status_code=401, detail={"code": "UNAUTHORIZED", "message": "Acceso no autorizado a la evidencia."})
+
+
+def source_operation(operation):
+    try:
+        with snowflake_data.connect() as connection:
+            return operation(connection)
+    except snowflake_data.SourceError as error:
+        raise HTTPException(status_code=error.status, detail={"code": error.code, "message": error.message}) from error
+
+
+@app.get("/customers")
+def customers(cutoff: AwareDatetime, query: str = Query(default="", pattern=r"^[A-Za-z0-9_-]{0,80}$"), authorization: str | None = Header(default=None)):
+    check_evidence_access(authorization)
+    return source_operation(lambda connection: snowflake_data.list_customers(connection, cutoff.isoformat(), query))
+
+
+@app.post("/case-snapshot")
+def case_snapshot(payload: CaseRequest, authorization: str | None = Header(default=None)):
+    check_evidence_access(authorization)
+    return source_operation(lambda connection: snowflake_data.case_snapshot(connection, payload.customerId, payload.cutoff.isoformat()))
+
+
+@app.post("/churn-score")
+def churn_score(payload: CaseRequest, authorization: str | None = Header(default=None)):
+    check_evidence_access(authorization)
+    return {"status": "unavailable", "risk": None, "reason": "Los artefactos tigo_pln_modelo clasifican reclamos; no contienen un predictor de abandono a 90 días."}

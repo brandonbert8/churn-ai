@@ -1,99 +1,86 @@
-# Agente de investigación de retención
+# Retención con Snowflake y PLN local
 
-El agente Mastra sustituye el ejemplo del clima en `/chat`. Elige herramientas según las observaciones: consulta tickets, contrasta facturas o incidencias, revisa acciones permitidas y prepara un borrador. No ejecuta cambios comerciales. Las decisiones y resultados de herramientas se conservan como mensajes en la memoria de Mastra; no se almacenan razonamientos internos.
+## Datos del agente
 
-## Ejecutar
+El modo predeterminado es `live`. El agente consulta el servicio local, que ejecuta consultas SELECT parametrizadas mediante el conector oficial de Snowflake. No recibe SQL del LLM y no utiliza un caso ficticio si falla una consulta.
 
-1. Instalar con `pnpm install`.
-2. Configurar `OPENROUTER_API_KEY` en `.env`. Se respeta el proveedor existente; `RETENTION_MODEL` permite cambiar el modelo, que debe admitir herramientas.
-3. `pnpm dev`, abrir `/chat`.
-4. Mantener corte `2026-10-20T23:59:00Z` y elegir `DEMO-001` (cargos coincidentes), `DEMO-002` (incidencia abierta) o `DEMO-003` (datos incompletos).
-5. Pedir «Investiga este caso y prepara una propuesta con referencias».
+Fuente verificada del proyecto: `DBT.BRONCE.STG_SOPORTE_TICKETS`. Se comprueba que existan `ID_CLIENTE`, `ID_TICKET`, `FECHA_CREACION` y `DESCRIPCION_ES` antes de consultar. La categoría operativa no se envía como entrada al clasificador.
 
-El modo predeterminado es `demo`. Los registros y políticas de ejemplo son ficticios y están identificados en interfaz, herramientas y respuesta. Los servicios PLN y churn no se simulan. Se puede investigar el caso con el LLM aunque esos modelos no estén conectados. Para probar sin consumo de LLM: `pnpm test`.
+- `GET /customers?cutoff=...&query=...`: hasta 25 clientes con tickets hasta el corte, por prefijo de ID. IDs, conteos y fechas proceden de Snowflake.
+- `POST /case-snapshot`: `{customerId, cutoff}`. Devuelve hasta 200 tickets recientes con ID de evidencia, tabla y query ID de Snowflake.
+- `POST /churn-score`: devuelve no disponible; la exportación PLN no contiene un predictor calibrado de abandono a 90 días.
 
-## Herramientas y límites
+La tabla `DBT.ORO.FCT_FACTURACION` fue verificada en el catálogo y consultada con un cliente real. `SNOWFLAKE_INVOICES_TABLE` habilita hasta 500 facturas emitidas antes del corte. Cada factura conserva ID, suscripción, período, fuente y total en centavos de BOB, convertido con redondeo decimal. Se comparan totales de facturas, no pagos ni conceptos individuales: una coincidencia solo es candidata a revisión. `queryIds` conserva las consultas de tickets y facturas.
 
-`getCustomerTimeline`, `compareInvoices`, `checkServiceIncidents`, `analyzeTicket`, `scoreChurn90d`, `evaluateAllowedActions`, `draftResolutionPlan`.
+Incidencias de red y políticas comerciales se devuelven vacías con `availability: not_configured`, no como ausencia demostrada de problemas. Sin tabla de facturas configurada se conserva la misma distinción. No se fabrican ofertas o políticas: `MANUAL_REVIEW` prepara un resumen para revisión humana con estado `pending-policy-validation`; no autoriza acciones comerciales.
 
-Hay seis operaciones distintas por turno (con caché y deduplicación concurrente) y ocho pasos de generación como máximo. El borrador requiere una política vigente y una acción elegible. Solo se permite revisión de facturación si hay cargos coincidentes; escalamiento técnico si hay incidencia abierta; solicitar datos si la política lo permite. Coincidencia de cargos no demuestra duplicidad ilegítima. Las cifras se calculan en centavos enteros de BOB.
+## Configuración
 
-El cliente y corte se fijan fuera del texto del modelo. El servidor valida el snapshot y filtra tanto la fecha del evento como su disponibilidad. El gateway debe devolver incidencias específicas del servicio del cliente y el estado conocido **en el corte**, no el estado actual de un evento antiguo. Correcciones históricas también necesitan su fecha de disponibilidad. Los IDs de evidencia deben ser únicos en el snapshot.
+Usar el `.env` local (ignorado por Git). `pnpm pln:dev` utiliza Node para cargar sus valores y pasarlos al proceso Python; no pone credenciales en argumentos de procesos.
 
-La memoria local se guarda en `.mastra/retention.db`, separada del ejemplo anterior. La memoria se separa por cookie aleatoria HttpOnly, cliente y corte. Se ignoran instrucciones/opciones/memoria/resultados de herramientas enviados en el cuerpo: solo se acepta el último mensaje de usuario; el historial procede del servidor. La cookie aísla sesiones, no autentica usuarios. El modo live exige `CHURN_APP_TOKEN`; la interfaz permite introducirlo temporalmente sin guardarlo en localStorage. Es un acceso de operador único, no un sistema multiusuario. Antes de usar datos empresariales, integrar SSO, autorización por cliente/tenant, retención de memoria y controles de acceso a la base Mastra.
-
-## Conectar datos de Snowflake
-
-Configurar `CHURN_DATA_MODE=live`, `CHURN_APP_TOKEN`, `CHURN_EVIDENCE_API_URL` y `CHURN_EVIDENCE_API_TOKEN`. El gateway autorizado debe ofrecer:
-
-- `POST {base}/case-snapshot`, entrada `{customerId, cutoff}`, salida según `snapshotSchema` en `src/mastra/retention/contracts.ts`.
-- `POST {base}/churn-score`, misma entrada, salida `{status:"available", customerId, cutoff, risk, horizonDays:90, calibrated:true, modelVersion, evidenceIds}`.
-
-El snapshot contiene `customerId`, arrays `tickets`, `invoices`, `incidents`, `policies`. Toda evidencia incluye `id`, `source`, `occurredAt`, `availableAt` ISO. Los campos específicos están definidos y validados en el contrato Zod. `demo.ts` muestra ejemplos completos.
-
-El gateway debe parametrizar consultas y aplicar autorización; no aceptar SQL generado por el LLM. La tabla conocida `DBT.BRONCE.STG_SOPORTE_TICKETS` aporta tickets; facturas, incidentes y políticas requieren fuentes verificadas adicionales. **No se ha implementado ni verificado un gateway Snowflake en esta entrega:** no existe en el repositorio y no se inventaron sus tablas. No se cambia automáticamente a demo si falla live.
-
-## Conectar PLN y embeddings de Colab
-
-Configurar `PLN_API_URL` con la URL completa del endpoint y `PLN_API_TOKEN`. Entrada:
-
-```json
-{"text":"Texto del ticket", "includeEmbedding":true}
+```dotenv
+CHURN_DATA_MODE=live
+PLN_MODEL_DIR=tigo_pln_modelo
+PLN_API_URL=http://127.0.0.1:8001/analyze
+CHURN_EVIDENCE_API_URL=http://127.0.0.1:8001
+SNOWFLAKE_ACCOUNT=organizacion-cuenta
+SNOWFLAKE_USER=usuario
+SNOWFLAKE_WAREHOUSE=warehouse_existente
+SNOWFLAKE_AUTHENTICATOR=snowflake
+SNOWFLAKE_TICKETS_TABLE=DBT.BRONCE.STG_SOPORTE_TICKETS
+SNOWFLAKE_INVOICES_TABLE=DBT.ORO.FCT_FACTURACION
+SNOWFLAKE_SOURCE_TIMEZONE=UTC
 ```
 
-Salida del servicio Python (un adaptador debe traducir los nombres si el contrato exportado por Colab usa otros):
+Añadir `SNOWFLAKE_PASSWORD` localmente si se usa contraseña. Nunca compartirla en chat ni incorporarla a código. `SNOWFLAKE_ROLE` es opcional: usar un rol con SELECT sobre la fuente existente. No se crean roles, tablas ni permisos.
 
-```json
-{
-  "category":"FACTURACION",
-  "scores":{"FACTURACION":0.7,"RED":0.3},
-  "modelVersion":"tfidf-lr-v1",
-  "calibrated":false,
-  "productionReady":false,
-  "embedding":{
-    "modelVersion":"beto-revision-y-pooling-versionados",
-    "dimensions":3,
-    "pooling":"mean sin padding ni tokens especiales",
-    "semanticSearchValidated":false,
-    "vector":[0.12,-0.04,0.31]
-  }
-}
-```
+Alternativas de autenticación soportadas por el conector:
 
-El vector de tres dimensiones es únicamente un ejemplo de contrato. BETO devuelve 768 valores: el servicio debe declarar `dimensions:768` y devolver los 768 números correspondientes. `embedding` es opcional (TF-IDF no es un embedding BETO). El servidor comprueba suma de scores, categoría y dimensiones, y envía al agente solo los metadatos de representación, evitando miles de valores en el contexto. No se calculan embeddings con el LLM, no hay vector store ni RAG obligatorio. El entrenamiento sigue en Colab. El servidor local `services/pln/app.py` carga la exportación provista, conserva la limpieza y devuelve la clasificación TF-IDF/LR junto con embeddings BETO de 768 dimensiones cuando se solicitan. No se entrena de nuevo. Un score de categoría no se convierte en probabilidad de churn.
+- SSO: `SNOWFLAKE_AUTHENTICATOR=externalbrowser`. Ejecutar el servicio desde una terminal con navegador disponible y completar el acceso de Snowflake.
+- Clave privada: `SNOWFLAKE_AUTHENTICATOR=SNOWFLAKE_JWT`, `SNOWFLAKE_PRIVATE_KEY_FILE` y, si está cifrada, `SNOWFLAKE_PRIVATE_KEY_PASSWORD`.
+- OAuth: `SNOWFLAKE_AUTHENTICATOR=oauth` y `SNOWFLAKE_TOKEN`.
 
-La búsqueda de casos similares queda pendiente de validar con pares anotados y Recall@k/MRR. El pooling BETO demostrativo no acredita calidad de similitud semántica.
+`CHURN_APP_TOKEN` protege la API del asesor en modo live. Introducir su valor en el campo de acceso antes de consultar clientes. `CHURN_EVIDENCE_API_TOKEN` autentica Next.js ante el servicio local. Son secretos distintos; la configuración local generó ambos sin imprimirlos. El acceso compartido actual es para un operador: una aplicación multiusuario requiere SSO y autorización por cliente/tenant.
 
-## Evaluación
-
-Las pruebas locales cubren aislamiento de caso, fuga temporal, facturación, presupuesto concurrente, datos incompletos, esquema PLN/embeddings y elegibilidad/citas del borrador. Validan lógica determinista; no prueban que el LLM siempre elija herramientas correctamente.
-
-Evaluar el agente con casos resueltos ocultando resoluciones y separando clientes/períodos. Comparar RAG, flujo fijo y agente adaptativo: diagnóstico por revisión experta, fidelidad a evidencia, acción válida, consultas útiles, abstención, costo y latencia. Incluir inyección de instrucciones, contradicciones y caída de servicios. Medir retención comercial mediante piloto controlado; las métricas PLN no prueban reducción de churn.
-
-Referencias: [herramientas Mastra](https://mastra.ai/docs/agents/tools), documentación Next.js instalada en `node_modules/next/dist/docs/` y contratos de los paquetes fijados en `pnpm-lock.yaml`.
-
-## Servidor PLN local con la exportación provista
-
-Se usa `.mastra/models/tigo` para los archivos extraídos de `tigo_pln_modelo.zip`, conservando la exportación original. `PLN_MODEL_DIR` cambia esa ruta. Cargar solo exportaciones de confianza: joblib no es un formato seguro para archivos arbitrarios.
+## Instalación e inicio
 
 ```sh
-python3 services/pln/prepare.py
-uv venv .venv-pln
-uv pip install --python .venv-pln/bin/python -r services/pln/requirements.lock --torch-backend=cpu
-.venv-pln/bin/python -m uvicorn services.pln.app:app --host 127.0.0.1 --port 8001
+uv pip install --python .venv-pln/bin/python -r services/pln/requirements.lock -r services/pln/requirements-snowflake.txt --torch-backend=cpu
+pnpm pln:dev
 ```
 
-En el servidor Next configurar `PLN_API_URL=http://127.0.0.1:8001/analyze`. El servicio carga TF-IDF/LR y precarga BETO antes de indicar que está listo, evitando que la primera consulta exceda el timeout del agente. `PLN_PRELOAD_BETO=false` desactiva esa precarga. Todo se ejecuta en CPU, sin descargar modelos desde Hugging Face. Los pesos deben estar completos, incluido el tokenizador. El endpoint `/health` informa la versión; `/analyze` valida longitud y opcionalmente `PLN_API_TOKEN`. La escucha predeterminada recomendada es localhost.
+En otra terminal, `pnpm dev`. El servicio escucha en localhost:8001 y la interfaz en localhost:3000/chat. La pantalla informa si faltan credenciales, el driver o el servicio. `/api/data-source` expone estado de configuración sin valores secretos. No abre una sesión de Snowflake solo por consultar ese estado.
 
-Los embeddings se calculan promediando la última capa de BETO sin padding ni tokens especiales, igual que en la demostración del notebook. La clasificación procede del baseline seleccionado; no confundir el embedding BETO con los scores TF-IDF/LR. Su rendimiento limitado y falta de calibración se exponen en el contrato.
+El conector oficial está instalado en el entorno local del proyecto.
 
-## Verificación de esta implementación
+## Modelo provisto: tigo_pln_modelo
 
-- `pnpm test`: siete pruebas de lógica aprobadas.
-- `pnpm typecheck`: aprobado.
-- `pnpm build`: aprobado con las rutas `/`, `/chat` y `/api/chat`.
-- `python3 -m unittest discover -s services/pln -p 'test_*.py'`: dos pruebas HTTP aprobadas sobre el servicio local con los pesos provistos. Verifican ocho scores que suman uno, embedding finito de 768 dimensiones y rechazo de texto vacío.
-- Prueba del modelo conversacional en el caso ficticio de facturación: eligió historial → comparación de facturas → elegibilidad → borrador con referencias, sin ejecutar acciones.
-- Prueba desde el chat en el caso ficticio de red: eligió historial → PLN local → incidencias → elegibilidad → borrador de escalamiento, con `pending-human-review` y `executed:false`. El PLN clasificó incorrectamente como FACTURACION; el agente contrastó la incidencia técnica y dejó la clasificación para revisión. Se verificó rechazo de una cita inventada y se agregó feedback estructurado para corregirla sin aceptarla.
+El servicio carga **directamente** la carpeta del proyecto: `tfidf_logistic.joblib`, `labels.json`, `manifest.json` y los pesos/tokenizador en `beto/`. No sustituye los pesos por otro modelo descargado. `PLN_MODEL_DIR` permite cambiar explícitamente la ruta. Las exportaciones joblib deben ser de confianza; no existe un endpoint para subir y ejecutar archivos arbitrarios.
 
-Estos controles verifican integración y lógica; no constituyen evaluación estadística del agente ni mejora demostrada de retención.
+`POST /analyze` recibe `{text, includeEmbedding:true}`. Aplica la misma limpieza de la exportación, devuelve las ocho categorías y scores de TF-IDF/LR, versión, calibración y `productionReady`. BETO produce un embedding de 768 valores mediante promedio de la última capa, excluyendo padding y tokens especiales. Se precarga antes de declarar que el servicio está listo.
+
+El adaptador comprueba los scores y dimensiones. Al LLM se le envían la categoría y los metadatos del embedding, no sus 768 valores. El vector completo sigue disponible en la respuesta del servicio PLN. No hay recuperación vectorial ni RAG obligatorio. La clasificación de reclamo no equivale a sentimiento, intención ni riesgo de abandono; un promedio BETO no acredita calidad de búsqueda semántica.
+
+La inferencia directa fue verificada con esta carpeta: ocho scores sumando uno y 768 valores de embedding. El manifiesto mantiene `production_ready=false` y scores sin calibrar; el corpus tiene solo 28 textos distintos.
+
+## Temporalidad y trazabilidad
+
+Se filtra `FECHA_CREACION` por el corte. Si existe una columna real de ingesta/disponibilidad, configurar `SNOWFLAKE_AVAILABLE_AT_COLUMN`: su existencia se valida en el catálogo antes de usarla y también se filtra por el corte. Sin esa columna se aproxima disponibilidad por creación y se incluye una advertencia: **no es un backtest libre de fuga verificado**.
+
+Los timestamps NTZ se interpretan con `SNOWFLAKE_SOURCE_TIMEZONE`; UTC es el valor predeterminado, no una afirmación sobre la zona original. Cambiarlo solo con evidencia de la fuente. Los registros con timestamps zonificados conservan su instante.
+
+Cada ticket conserva su tabla y el snapshot conserva `queryId`. La memoria se separa por sesión HttpOnly, modo, cliente y corte. Se acepta únicamente el último mensaje del asesor del navegador: el historial y los resultados de herramientas proceden del servidor. Los IDs de cita deben pertenecer al caso; una referencia inventada solicita corrección en vez de aprobar el borrador.
+
+## Verificaciones y pendientes
+
+Las pruebas cubren consultas parametrizadas, validación de identificadores/columnas, fuente y query ID, filtrado temporal, IDs duplicados, presupuesto de herramientas, scores/embeddings, ausencia de fuentes y revisión humana sin políticas. Las conexiones unitarias de Snowflake son dobles de prueba; **no prueban autenticación ni filas de una cuenta real**.
+
+Para verificar la conexión real: instalar el driver, completar la autenticación local y ejecutar `pnpm snowflake:check`. El comando consulta filas reales, ejecuta el PLN y muestra fuente/query ID/dimensiones sin imprimir textos ni credenciales. También se pueden consultar clientes en la interfaz. La consulta debe devolver query ID y tabla reales; después investigar un ticket con `analyzeTicket`. No afirmar conexión efectiva antes de ese resultado.
+
+Verificación real del 22 de octubre de 2026: el caso `CLI-002301` devolvió un ticket y dos facturas, con consultas `01c7e666-0002-82a7-0002-cb06000e91b2` y `01c7e666-0002-82c9-0002-cb06000ef076`. La inferencia del ticket devolvió ocho clases y un embedding de 768 dimensiones. Queda pendiente una fuente de incidencias de red y políticas comerciales. La disponibilidad de facturas se aproxima con `FECHA_EMISION`; tampoco constituye un backtest verificado.
+
+La prueba completa de `POST /api/chat` finalizó con HTTP 200 y stream terminado, sin errores de herramientas. El agente invocó `getCustomerTimeline`, `compareInvoices`, `analyzeTicket`, `evaluateAllowedActions` y `draftResolutionPlan`; produjo `MANUAL_REVIEW` con `pending-policy-validation` y `executed:false`. La prueba verifica integración y trazabilidad, no exactitud lingüística ni eficacia para reducir churn.
+
+La compilación de producción `pnpm build` terminó correctamente con Webpack, Tailwind/PostCSS y las bibliotecas nativas de LibSQL externas al empaquetado. Pasaron las nueve pruebas TypeScript, seis pruebas del adaptador Snowflake y dos de inferencia HTTP con el modelo local. La interfaz también se verificó consultando clientes y recibiendo la síntesis del caso real.
+
+Fuentes: [conexión oficial Python](https://docs.snowflake.com/en/developer-guide/python-connector/python-connector-connect), [consultas con parámetros](https://docs.snowflake.com/en/developer-guide/python-connector/python-connector-example), [herramientas Mastra](https://mastra.ai/docs/agents/tools).

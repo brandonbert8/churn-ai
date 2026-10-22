@@ -1,7 +1,7 @@
 import { createTool } from '@mastra/core/tools'
 import type { RequestContext } from '@mastra/core/request-context'
 import { z } from 'zod'
-import { allowedActions, compareCharges, RetentionCase } from '../retention/service'
+import { allowedActions, compareCharges, dataMode, RetentionCase } from '../retention/service'
 
 export function activeCase(context?: RequestContext): RetentionCase {
   const value = context?.get('retentionCase')
@@ -18,7 +18,7 @@ export const getCustomerTimeline = createTool({
     const current = activeCase(context?.requestContext)
     return current.run('timeline', async () => {
       const snapshot = await current.load()
-      return { mode: process.env.CHURN_DATA_MODE ?? 'demo', ...current.scope, tickets: snapshot.tickets }
+      return { mode: dataMode(), ...current.scope, tickets: snapshot.tickets, source: snapshot.source, queryId: snapshot.queryId, queryIds: snapshot.queryIds, warnings: snapshot.warnings, availability: snapshot.availability }
     })
   },
 })
@@ -37,7 +37,10 @@ export const checkServiceIncidents = createTool({
   inputSchema: empty,
   execute: async (_, context) => {
     const current = activeCase(context?.requestContext)
-    return current.run('incidents', async () => ({ incidents: (await current.load()).incidents }))
+    return current.run('incidents', async () => {
+      const snapshot = await current.load()
+      return { status: snapshot.availability?.incidents === 'not_configured' ? 'not_configured' : 'available', incidents: snapshot.incidents }
+    })
   },
 })
 export const analyzeTicket = createTool({
@@ -64,14 +67,18 @@ export const evaluateAllowedActions = createTool({
   inputSchema: empty,
   execute: async (_, context) => {
     const current = activeCase(context?.requestContext)
-    return current.run('actions', async () => ({ actions: allowedActions(await current.load()) }))
+    return current.run('actions', async () => {
+      const snapshot = await current.load()
+      return { actions: allowedActions(snapshot), policyStatus: snapshot.availability?.policies ?? 'available',
+        manualReviewAvailable: true, limitation: 'Si faltan políticas, solo se puede preparar MANUAL_REVIEW, sin autorización comercial.' }
+    })
   },
 })
 export const draftResolutionPlan = createTool({
   id: 'draft-resolution-plan',
   description: 'Construir una propuesta estructurada para revisión humana, con hipótesis y referencias verificadas. No envía mensajes, aplica descuentos ni modifica cuentas.',
   inputSchema: z.object({
-    action: z.enum(['BILLING_REVIEW', 'NETWORK_ESCALATION', 'REQUEST_DETAILS']),
+    action: z.enum(['BILLING_REVIEW', 'NETWORK_ESCALATION', 'REQUEST_DETAILS', 'MANUAL_REVIEW']),
     hypotheses: z.array(z.object({
       description: z.string().min(1).max(500),
       status: z.enum(['supported', 'refuted', 'unresolved']),
@@ -83,7 +90,7 @@ export const draftResolutionPlan = createTool({
     return current.run(`draft:${JSON.stringify({ action, hypotheses })}`, async () => {
       const snapshot = await current.load()
       const selected = allowedActions(snapshot).find(item => item.action === action)
-      if (!selected) throw new Error('Acción no elegible o sin política vigente')
+      if (!selected && action !== 'MANUAL_REVIEW') throw new Error('Acción no elegible o sin política vigente')
       const ids = await current.validEvidenceIds()
       for (const hypothesis of hypotheses) {
         if (hypothesis.status !== 'unresolved' && !hypothesis.evidenceIds.length) throw new Error('Una hipótesis evaluada necesita evidencia')
@@ -95,10 +102,10 @@ export const draftResolutionPlan = createTool({
       }
       return {
         ...current.scope,
-        mode: process.env.CHURN_DATA_MODE ?? 'demo',
-        status: 'pending-human-review',
+        mode: dataMode(),
+        status: action === 'MANUAL_REVIEW' ? 'pending-policy-validation' : 'pending-human-review',
         hypotheses,
-        proposedAction: selected,
+        proposedAction: selected ?? { action: 'MANUAL_REVIEW', policyId: null, requiresHumanReview: true, description: 'Resumen de evidencia para revisión humana; no autoriza ninguna acción comercial.' },
         executed: false,
         limitation: 'Referencias validadas por existencia; la interpretación del diagnóstico requiere revisión humana.',
       }

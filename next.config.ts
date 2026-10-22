@@ -4,15 +4,10 @@ const nextConfig: NextConfig = {
   /* config options here */
   cacheComponents: true,
   partialPrefetching: true,
-  turbopack: {
-    rules: {
-      "*.css": {
-        loaders: ["@tailwindcss/turbopack"],
-        as: "*.css",
-      },
-    },
-  },
   serverExternalPackages: [
+    "@mastra/libsql",
+    "@libsql/client",
+    "libsql",
     "@mastra/duckdb",
     "@duckdb/node-api",
     "@duckdb/node-bindings",

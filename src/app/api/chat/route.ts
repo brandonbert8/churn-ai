@@ -3,11 +3,11 @@ import { toAISdkMessages } from '@mastra/ai-sdk/ui'
 import { RequestContext } from '@mastra/core/request-context'
 import { createUIMessageStreamResponse } from 'ai'
 import { cookies } from 'next/headers'
-import { timingSafeEqual } from 'node:crypto'
+import { accessAllowed } from '@/lib/retention-access'
 import { z } from 'zod'
 import { mastra } from '@/mastra'
 import { scopeSchema } from '@/mastra/retention/contracts'
-import { dataMode, RetentionCase } from '@/mastra/retention/service'
+import { dataMode, DataSourceError, RetentionCase } from '@/mastra/retention/service'
 
 const bodySchema = z.object({
   ...scopeSchema.shape,
@@ -17,15 +17,6 @@ const bodySchema = z.object({
   })).min(1).max(100),
 })
 const textSchema = z.object({ type: z.literal('text'), text: z.string().trim().min(1).max(10000) })
-
-function accessAllowed(request: Request) {
-  if (dataMode() === 'demo') return true
-  const expected = process.env.CHURN_APP_TOKEN
-  const supplied = request.headers.get('authorization')?.replace(/^Bearer /, '')
-  if (!expected || !supplied) return false
-  const a = Buffer.from(expected), b = Buffer.from(supplied)
-  return a.length === b.length && timingSafeEqual(a, b)
-}
 
 async function session() {
   const store = await cookies()
@@ -37,7 +28,7 @@ async function session() {
   return id
 }
 function memoryScope(id: string, scope: z.infer<typeof scopeSchema>) {
-  return { resource: id, thread: `${id}:${scope.customerId}:${new Date(scope.cutoff).toISOString()}` }
+  return { resource: id, thread: `${id}:${dataMode()}:${scope.customerId}:${new Date(scope.cutoff).toISOString()}` }
 }
 
 export async function POST(request: Request) {
@@ -68,6 +59,7 @@ export async function POST(request: Request) {
     })
     return createUIMessageStreamResponse({ stream, headers: { 'Cache-Control': 'no-store' } })
   } catch (error) {
+    if (error instanceof DataSourceError) return Response.json({ error: error.message }, { status: error.status })
     const invalid = error instanceof z.ZodError || error instanceof SyntaxError
     return Response.json({ error: invalid ? 'Solicitud o datos del servicio con formato inválido.' : 'No se pudo abrir el caso o conectar con el proveedor. Revisa la configuración.' }, { status: invalid ? 400 : 502 })
   }

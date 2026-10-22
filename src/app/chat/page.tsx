@@ -62,7 +62,8 @@ function CaseChat({ scope }: { scope: Scope }) {
     <div className="relative flex-1 min-h-0 w-full p-6">
       <div className="flex h-full flex-col">
         {historyError && <p role="alert">No se pudo cargar el historial. Revisa el acceso o vuelve a abrir el caso.</p>}
-        {error && <p role="alert" className="text-red-600">No se pudo completar la respuesta. Revisa la configuración y vuelve a enviar el mensaje.</p>}
+        {error && <p role="alert" className="text-red-600">{responseError(error)}</p>}
+        {(status === 'submitted' || status === 'streaming') && <p role="status" className="text-sm text-muted-foreground pb-2">Investigando el caso y contrastando evidencias… Las comprobaciones aparecen debajo.</p>}
         <Conversation className="h-full">
           <ConversationContent>
             {messages.length === 0 && <div className="rounded-xl border p-5 space-y-3">
@@ -130,23 +131,76 @@ function CaseChat({ scope }: { scope: Scope }) {
   )
 }
 
+type Customer = { customerId: string; ticketCount: number }
+type SourceState = {
+  mode: 'demo' | 'live'; defaultCutoff: string; serviceAvailable: boolean
+  pln: { modelDirectory: string; modelVersion: string; snowflake?: { configured: boolean; driverInstalled: boolean; missingVariables: string[]; table: string } } | null
+}
+function responseError(error: Error) {
+  try { return JSON.parse(error.message).error ?? 'No se pudo completar la respuesta.' }
+  catch { return 'No se pudo completar la respuesta. Revisa el servicio y el acceso.' }
+}
+
 export default function Chat() {
-  const [customerId, setCustomerId] = useState('DEMO-001')
-  const [cutoff, setCutoff] = useState('2026-10-20T23:59:00Z')
+  const [customerId, setCustomerId] = useState('')
+  const [cutoff, setCutoff] = useState('')
   const [token, setToken] = useState('')
-  const [scope, setScope] = useState<Scope>({ customerId: 'DEMO-001', cutoff: '2026-10-20T23:59:00Z', token: '' })
+  const [scope, setScope] = useState<Scope | null>(null)
+  const [source, setSource] = useState<SourceState | null>(null)
+  const [customers, setCustomers] = useState<Customer[]>([])
+  const [catalogError, setCatalogError] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    const controller = new AbortController()
+    fetch('/api/data-source', { signal: controller.signal }).then(res => {
+      if (!res.ok) throw new Error('Configuración no disponible')
+      return res.json()
+    }).then((data: SourceState) => { setSource(data); setCutoff(data.defaultCutoff) }).catch(() => {
+      if (!controller.signal.aborted) setCatalogError('No se pudo consultar la configuración del servicio.')
+    })
+    return () => controller.abort()
+  }, [])
+
+  const loadCustomers = async () => {
+    setLoading(true); setCatalogError(''); setCustomers([])
+    try {
+      const query = new URLSearchParams({ cutoff, query: customerId })
+      const response = await fetch(`/api/customers?${query}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error ?? 'No se pudo consultar Snowflake.')
+      setCustomers(data.customers)
+      if (!data.customers.length) setCatalogError('No hay clientes con tickets para esa búsqueda y corte.')
+    } catch (error) {
+      setCatalogError(error instanceof Error ? error.message : 'No se pudo consultar Snowflake.')
+    } finally { setLoading(false) }
+  }
   return <main className="flex h-screen flex-col max-w-6xl mx-auto">
     <header className="border-b p-6 space-y-3">
       <h1 className="text-2xl font-semibold">Investigador de retención · Tigo</h1>
-      <p className="text-sm text-muted-foreground">DEMO-001: cargos coincidentes · DEMO-002: falla de red · DEMO-003: datos insuficientes. Son casos y políticas ficticios.</p>
+      <p className="text-sm text-muted-foreground">{source?.mode === 'demo'
+        ? 'Modo de demostración seleccionado explícitamente: casos ficticios.'
+        : `Fuente: Snowflake · ${source?.pln?.snowflake?.table ?? 'tickets del proyecto'}`}</p>
+      {source?.pln && <p className="text-xs">PLN local: {source.pln.modelDirectory} · TF-IDF/LR y embeddings BETO.</p>}
+      {source && !source.serviceAvailable && <p role="status">Inicia el servicio local de PLN y Snowflake para consultar los datos.</p>}
+      {source?.mode === 'live' && source.pln?.snowflake && !source.pln.snowflake.configured && <p role="status">Conexión pendiente: configura {source.pln.snowflake.missingVariables.join(', ')} en el servidor.</p>}
+      {source?.mode === 'live' && source.pln?.snowflake && !source.pln.snowflake.driverInstalled && <p role="status">Falta instalar el conector de Snowflake en el servicio local.</p>}
       <form className="flex flex-wrap gap-3 items-end" onSubmit={event => { event.preventDefault(); setScope({ customerId, cutoff, token }) }}>
-        <label className="text-sm">Cliente<input aria-label="Cliente" className="block border rounded p-2" value={customerId} onChange={e => setCustomerId(e.target.value)} required pattern="[A-Za-z0-9_-]{1,80}" /></label>
+        <label className="text-sm">Cliente o prefijo<input aria-label="Cliente" className="block border rounded p-2" value={customerId} onChange={e => setCustomerId(e.target.value)} required pattern="[A-Za-z0-9_-]{1,80}" placeholder="ID del cliente en Snowflake" /></label>
         <label className="text-sm">Corte temporal (ISO)<input aria-label="Corte temporal" className="block border rounded p-2" value={cutoff} onChange={e => setCutoff(e.target.value)} required /></label>
-        <label className="text-sm">Acceso live (opcional)<input aria-label="Acceso live" type="password" autoComplete="off" className="block border rounded p-2" value={token} onChange={e => setToken(e.target.value)} /></label>
-        <button className="border rounded px-4 py-2" type="submit">Abrir caso</button>
+        {source?.mode !== 'demo' && <label className="text-sm">Acceso del asesor<input aria-label="Acceso live" type="password" autoComplete="off" className="block border rounded p-2" value={token} onChange={e => setToken(e.target.value)} /></label>}
+        <button className="border rounded px-4 py-2" type="button" disabled={loading || !cutoff} onClick={loadCustomers}>{loading ? 'Consultando…' : 'Consultar clientes'}</button>
+        <button className="border rounded px-4 py-2" type="submit" disabled={!customerId || !cutoff}>Abrir caso</button>
       </form>
-      <p className="text-xs">Caso abierto: {scope.customerId} · {scope.cutoff}. No se ejecutan acciones comerciales.</p>
+      {catalogError && <p role="alert" className="text-red-600">{catalogError}</p>}
+      {customers.length > 0 && <label className="block text-sm">Clientes con tickets hasta el corte
+        <select aria-label="Clientes de Snowflake" className="border rounded p-2 mx-2" value="" onChange={event => { if (event.target.value) { setCustomerId(event.target.value); setScope({ customerId: event.target.value, cutoff, token }) } }}>
+          <option value="">Seleccionar cliente…</option>
+          {customers.map(customer => <option key={customer.customerId} value={customer.customerId}>{customer.customerId} · {customer.ticketCount} tickets</option>)}
+        </select>
+      </label>}
+      {scope && <p className="text-xs">Caso abierto: {scope.customerId} · {scope.cutoff}. No se ejecutan acciones comerciales.</p>}
     </header>
-    <CaseChat key={`${scope.customerId}:${scope.cutoff}:${scope.token}`} scope={scope} />
+    {scope ? <CaseChat key={`${scope.customerId}:${scope.cutoff}:${scope.token}`} scope={scope} /> : <section className="p-6"><h2 className="font-semibold">Selecciona un cliente del proyecto</h2><p>Consulta clientes en Snowflake o introduce su ID para revisar sus tickets con el modelo PLN local.</p></section>}
   </main>
 }

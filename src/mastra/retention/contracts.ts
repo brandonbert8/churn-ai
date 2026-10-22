@@ -14,6 +14,16 @@ const evidence = z.object({
 })
 export const snapshotSchema = z.object({
   customerId: scopeSchema.shape.customerId,
+  source: z.string().optional(),
+  queryId: z.string().optional(),
+  queryIds: z.record(z.string(), z.string()).optional(),
+  warnings: z.array(z.string()).optional(),
+  availability: z.object({
+    tickets: z.enum(['available', 'not_configured']),
+    invoices: z.enum(['available', 'not_configured']),
+    incidents: z.enum(['available', 'not_configured']),
+    policies: z.enum(['available', 'not_configured']),
+  }).optional(),
   tickets: z.array(evidence.extend({ text: z.string().max(10000) })).max(200),
   invoices: z.array(evidence.extend({
     serviceId: z.string(), period: z.string(), chargeCode: z.string(),
