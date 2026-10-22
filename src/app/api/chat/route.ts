@@ -1,44 +1,87 @@
 import { handleChatStream } from '@mastra/ai-sdk'
 import { toAISdkMessages } from '@mastra/ai-sdk/ui'
+import { RequestContext } from '@mastra/core/request-context'
 import { createUIMessageStreamResponse } from 'ai'
+import { cookies } from 'next/headers'
+import { timingSafeEqual } from 'node:crypto'
+import { z } from 'zod'
 import { mastra } from '@/mastra'
-import { NextResponse } from 'next/server'
+import { scopeSchema } from '@/mastra/retention/contracts'
+import { dataMode, RetentionCase } from '@/mastra/retention/service'
 
-const THREAD_ID = 'example-user-id'
-const RESOURCE_ID = 'weather-chat'
+const bodySchema = z.object({
+  ...scopeSchema.shape,
+  messages: z.array(z.object({
+    id: z.string().min(1).max(100), role: z.enum(['user', 'assistant']),
+    parts: z.array(z.unknown()).max(100),
+  })).min(1).max(100),
+})
+const textSchema = z.object({ type: z.literal('text'), text: z.string().trim().min(1).max(10000) })
 
-export async function POST(req: Request) {
-  const params = await req.json()
-  const stream = await handleChatStream({
-    mastra,
-    agentId: 'weather-agent',
-    version: 'v7',
-    params: {
-      ...params,
-      memory: {
-        ...params.memory,
-        thread: THREAD_ID,
-        resource: RESOURCE_ID,
-      },
-    },
-  })
-  return createUIMessageStreamResponse({ stream })
+function accessAllowed(request: Request) {
+  if (dataMode() === 'demo') return true
+  const expected = process.env.CHURN_APP_TOKEN
+  const supplied = request.headers.get('authorization')?.replace(/^Bearer /, '')
+  if (!expected || !supplied) return false
+  const a = Buffer.from(expected), b = Buffer.from(supplied)
+  return a.length === b.length && timingSafeEqual(a, b)
 }
 
-export async function GET() {
-  const memory = await mastra.getAgentById('weather-agent').getMemory()
-  let response = null
-
-  try {
-    response = await memory?.recall({
-      threadId: THREAD_ID,
-      resourceId: RESOURCE_ID,
-    })
-  } catch {
-    console.log('No previous messages found.')
+async function session() {
+  const store = await cookies()
+  let id = store.get('retention-session')?.value
+  if (!id || !z.uuid().safeParse(id).success) {
+    id = crypto.randomUUID()
+    store.set('retention-session', id, { httpOnly: true, sameSite: 'strict', secure: process.env.NODE_ENV === 'production', path: '/', maxAge: 86400 })
   }
+  return id
+}
+function memoryScope(id: string, scope: z.infer<typeof scopeSchema>) {
+  return { resource: id, thread: `${id}:${scope.customerId}:${new Date(scope.cutoff).toISOString()}` }
+}
 
-  const uiMessages = toAISdkMessages(response?.messages || [], { version: 'v7' })
+export async function POST(request: Request) {
+  if (!accessAllowed(request)) return Response.json({ error: 'Acceso no autorizado al modo live.' }, { status: 401 })
+  if (!process.env.OPENROUTER_API_KEY) return Response.json({ error: 'Falta OPENROUTER_API_KEY en el servidor.' }, { status: 503 })
+  try {
+    const parsed = bodySchema.safeParse(await request.json())
+    if (!parsed.success) return Response.json({ error: 'Selecciona un caso, corte y mensaje válidos.' }, { status: 400 })
+    const { customerId, cutoff, messages } = parsed.data
+    // Only the last user text is accepted. History/tool results come from server memory.
+    const latest = messages.at(-1)
+    if (latest?.role !== 'user') return Response.json({ error: 'Se requiere un mensaje del asesor.' }, { status: 400 })
+    const parts = latest.parts.map(part => textSchema.parse(part))
+    if (!parts.length) return Response.json({ error: 'Mensaje vacío.' }, { status: 400 })
+    const scope = { customerId, cutoff }
+    const current = new RetentionCase(scope)
+    await current.load()
+    const requestContext = new RequestContext()
+    requestContext.set('retentionCase', current)
+    const stream = await handleChatStream({
+      mastra, agentId: 'retention-agent', version: 'v7', sendReasoning: false,
+      params: {
+        messages: [{ id: latest.id, role: 'user', parts }],
+        memory: memoryScope(await session(), scope),
+        requestContext, maxSteps: 8, abortSignal: request.signal,
+      },
+      onError: () => 'No se pudo completar la investigación. Revisa la conexión e inténtalo de nuevo.',
+    })
+    return createUIMessageStreamResponse({ stream, headers: { 'Cache-Control': 'no-store' } })
+  } catch (error) {
+    const invalid = error instanceof z.ZodError || error instanceof SyntaxError
+    return Response.json({ error: invalid ? 'Solicitud o datos del servicio con formato inválido.' : 'No se pudo abrir el caso o conectar con el proveedor. Revisa la configuración.' }, { status: invalid ? 400 : 502 })
+  }
+}
 
-  return NextResponse.json(uiMessages)
+export async function GET(request: Request) {
+  if (!accessAllowed(request)) return Response.json({ error: 'Acceso no autorizado al modo live.' }, { status: 401 })
+  const query = Object.fromEntries(new URL(request.url).searchParams)
+  const parsed = scopeSchema.safeParse(query)
+  if (!parsed.success) return Response.json({ error: 'Caso y corte requeridos.' }, { status: 400 })
+  const scope = memoryScope(await session(), parsed.data)
+  const memory = await mastra.getAgentById('retention-agent').getMemory()
+  const existing = await memory?.getThreadById({ threadId: scope.thread })
+  if (!existing) return Response.json([], { headers: { 'Cache-Control': 'no-store' } })
+  const response = await memory?.recall({ threadId: scope.thread, resourceId: scope.resource })
+  return Response.json(toAISdkMessages(response?.messages ?? [], { version: 'v7' }), { headers: { 'Cache-Control': 'no-store' } })
 }

@@ -5,7 +5,6 @@ import type {
   ComponentProps,
   FormEvent,
   HTMLAttributes,
-  MouseEvent,
   ReactNode,
 } from "react";
 
@@ -237,7 +236,7 @@ export const QuestionOption = ({
   const isSelected = question.selectedValues.includes(value);
   const role = question.selectionMode === "single" ? "radio" : "checkbox";
   const handleClick = useCallback(
-    (event: MouseEvent<HTMLButtonElement>) => {
+    (event: Parameters<NonNullable<ComponentProps<typeof Button>["onClick"]>>[0]) => {
       question.toggleValue(value);
       onClick?.(event);
     },
