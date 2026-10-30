@@ -8,6 +8,8 @@ export type CaseScope = z.infer<typeof scopeSchema>
 
 const evidence = z.object({
   id: z.string().min(1),
+  sourceId: z.string().min(1).optional(),
+  sourceIdColumn: z.string().min(1).optional(),
   occurredAt: z.iso.datetime({ offset: true }),
   availableAt: z.iso.datetime({ offset: true }),
   source: z.string().min(1),

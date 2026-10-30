@@ -1,3 +1,6 @@
+import { mkdirSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { Mastra } from '@mastra/core/mastra';
 import { PinoLogger } from '@mastra/loggers';
@@ -7,11 +10,18 @@ import { Observability, MastraStorageExporter, MastraPlatformExporter, Sensitive
 import { retentionAgent } from './agents/retention-agent';
 
 
+const databaseUrl = process.env.TURSO_DATABASE_URL ?? 'file:./.mastra/retention.db';
+// LibSQL creates the file, but its parent directory must already exist.
+if (databaseUrl.startsWith('file:') && databaseUrl !== 'file::memory:') {
+  const databasePath = databaseUrl.startsWith('file://') ? fileURLToPath(databaseUrl) : resolve(databaseUrl.slice(5));
+  mkdirSync(dirname(databasePath), { recursive: true });
+}
+
 export const mastra = new Mastra({
   agents: { retentionAgent },
   storage: new LibSQLStore({
     id: 'retention-storage',
-    url: process.env.TURSO_DATABASE_URL ?? 'file:./.mastra/retention.db',
+    url: databaseUrl,
     authToken: process.env.TURSO_AUTH_TOKEN,
   }),
   logger: new PinoLogger({
