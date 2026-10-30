@@ -28,6 +28,18 @@ class SnowflakeTests(unittest.TestCase):
         self.environment.start()
         self.addCleanup(self.environment.stop)
 
+    def test_utc_works_without_system_timezone_database(self):
+        with patch.object(source, 'ZoneInfo', side_effect=source.ZoneInfoNotFoundError('UTC')):
+            self.assertEqual(source.iso(datetime(2026, 10, 18)), '2026-10-18T00:00:00Z')
+            self.assertEqual(source.cutoff_value('2026-10-20T23:59:00Z'), datetime(2026, 10, 20, 23, 59))
+
+    def test_missing_non_utc_timezone_is_configuration_error(self):
+        with patch.dict(os.environ, {'SNOWFLAKE_SOURCE_TIMEZONE': 'America/La_Paz'}):
+            with patch.object(source, 'ZoneInfo', side_effect=source.ZoneInfoNotFoundError('missing')):
+                with self.assertRaises(source.SourceError) as result:
+                    source.cutoff_value('2026-10-20T23:59:00Z')
+                self.assertEqual(result.exception.code, 'MISSING_CONFIGURATION')
+
     def test_snapshot_is_real_source_bound_and_missing_sources_explicit(self):
         stamp = datetime(2026, 10, 18)
         connection = Connection([('T1', stamp, 'No quiero cancelar', stamp)])
@@ -38,6 +50,8 @@ class SnowflakeTests(unittest.TestCase):
         self.assertTrue(sql.strip().startswith('SELECT'))
         self.assertEqual(result['tickets'][0]['source'], 'DBT.BRONCE.STG_SOPORTE_TICKETS')
         self.assertEqual(result['tickets'][0]['id'], 'SF-TICKET:T1')
+        self.assertEqual(result['tickets'][0]['sourceId'], 'T1')
+        self.assertEqual(result['tickets'][0]['sourceIdColumn'], 'ID_TICKET')
         self.assertEqual(result['availability']['invoices'], 'not_configured')
         self.assertEqual(result['policies'], [])
         self.assertTrue(any('no verificada' in warning for warning in result['warnings']))
@@ -71,6 +85,8 @@ class SnowflakeTests(unittest.TestCase):
             rows, query_id, warnings = source.invoice_evidence(connection, "42'", '2026-10-20T23:59:00Z')
         self.assertEqual(rows[0]['amountMinor'], 1008)
         self.assertEqual(rows[0]['id'], 'SF-INVOICE:F1')
+        self.assertEqual(rows[0]['sourceId'], 'F1')
+        self.assertEqual(rows[0]['sourceIdColumn'], 'ID_FACTURA')
         self.assertEqual(query_id, 'invoice-query')
         sql, params = cursor.execute.call_args.args
         self.assertNotIn("42'", sql)
@@ -88,10 +104,25 @@ class SnowflakeTests(unittest.TestCase):
         self.assertEqual(result.exception.code, 'DUPLICATE_TICKET_IDS')
 
     def test_customer_catalog_uses_bound_prefix_and_readonly_query(self):
-        connection = Connection([('42', 3, datetime(2026, 10, 18))])
+        connection = Connection([('42', 3, datetime(2026, 10, 18), 1)])
         result = source.list_customers(connection, '2026-10-20T23:59:00Z', '4')
         self.assertEqual(result['customers'][0]['customerId'], '42')
         self.assertEqual(connection.calls[-1][1][1], '4')
-        self.assertIn('LIMIT 25', connection.calls[-1][0])
+        self.assertIn('LIMIT 26 OFFSET %s', connection.calls[-1][0])
+        self.assertEqual(result['total'], 1)
+        self.assertFalse(result['hasMore'])
+        self.assertEqual(connection.calls[-1][1][2], 0)
+
+    def test_catalog_pagination_exposes_total_and_next_page(self):
+        rows = [(str(i), 1, datetime(2026, 10, 18), 80) for i in range(26)]
+        connection = Connection(rows)
+        page = source.list_customers(connection, '2026-10-20T23:59:00Z', '', 25)
+        self.assertEqual(len(page['customers']), 25)
+        self.assertEqual(page['total'], 80)
+        self.assertTrue(page['hasMore'])
+        self.assertEqual(page['offset'], 25)
+        self.assertEqual(connection.calls[-1][1], (datetime(2026, 10, 20, 23, 59), '', 25))
+        with self.assertRaises(source.SourceError):
+            source.list_customers(connection, '2026-10-20T23:59:00Z', '', -1)
 
 if __name__ == '__main__': unittest.main()

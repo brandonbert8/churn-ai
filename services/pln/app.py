@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import secrets
 import threading
+from typing import Literal
 import unicodedata
 
 import joblib
@@ -16,6 +17,7 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field, AwareDatetime
 from fastapi import Query
 from services.pln import snowflake_data
+from services.pln.customer_ranking import rank_customers
 
 
 def clean_text(value):
@@ -139,9 +141,9 @@ def source_operation(operation):
 
 
 @app.get("/customers")
-def customers(cutoff: AwareDatetime, query: str = Query(default="", pattern=r"^[A-Za-z0-9_-]{0,80}$"), authorization: str | None = Header(default=None)):
+def customers(cutoff: AwareDatetime, query: str = Query(default="", pattern=r"^[A-Za-z0-9_-]{0,80}$"), offset: int = Query(default=0, ge=0, le=1000000), authorization: str | None = Header(default=None)):
     check_evidence_access(authorization)
-    return source_operation(lambda connection: snowflake_data.list_customers(connection, cutoff.isoformat(), query))
+    return source_operation(lambda connection: snowflake_data.list_customers(connection, cutoff.isoformat(), query, offset))
 
 
 @app.post("/case-snapshot")
@@ -154,3 +156,18 @@ def case_snapshot(payload: CaseRequest, authorization: str | None = Header(defau
 def churn_score(payload: CaseRequest, authorization: str | None = Header(default=None)):
     check_evidence_access(authorization)
     return {"status": "unavailable", "risk": None, "reason": "Los artefactos tigo_pln_modelo clasifican reclamos; no contienen un predictor de abandono a 90 días."}
+
+
+class CustomerRankingRequest(BaseModel):
+    cutoff: AwareDatetime
+    limit: int = Field(default=10, ge=1, le=50)
+    metric: Literal['complaints', 'tickets'] = 'complaints'
+    minTickets: int = Field(default=1, ge=1, le=1000000)
+    lookbackDays: int | None = Field(default=None, ge=1, le=3650)
+    activeOnly: bool = True
+
+
+@app.post('/customer-ranking')
+def customer_ranking(payload: CustomerRankingRequest, authorization: str | None = Header(default=None)):
+    check_evidence_access(authorization)
+    return source_operation(lambda connection: rank_customers(connection, payload.cutoff.isoformat(), payload.limit, payload.metric, payload.minTickets, payload.lookbackDays, payload.activeOnly))

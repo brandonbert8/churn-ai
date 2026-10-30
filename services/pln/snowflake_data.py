@@ -5,7 +5,7 @@ from decimal import Decimal, ROUND_HALF_UP
 import importlib.util
 import os
 import re
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 class SourceError(Exception):
@@ -70,18 +70,29 @@ def connect():
         if connection is not None: connection.close()
 
 
+def source_timezone():
+    name = os.environ.get('SNOWFLAKE_SOURCE_TIMEZONE', 'UTC')
+    # Windows may not ship the IANA database; UTC needs no external tzdata.
+    if name == 'UTC':
+        return timezone.utc
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError as error:
+        raise SourceError('MISSING_CONFIGURATION', 'No se pudo cargar la zona horaria configurada. Instala tzdata en el entorno Python o configura SNOWFLAKE_SOURCE_TIMEZONE=UTC.') from error
+
+
 def iso(value):
     if isinstance(value, str): value = datetime.fromisoformat(value.replace('Z', '+00:00'))
     if isinstance(value, date) and not isinstance(value, datetime): value = datetime.combine(value, datetime.min.time())
     if value.tzinfo is None:
-        value = value.replace(tzinfo=ZoneInfo(os.environ.get('SNOWFLAKE_SOURCE_TIMEZONE', 'UTC')))
+        value = value.replace(tzinfo=source_timezone())
     return value.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
 
 
 def cutoff_value(value):
     # FECHA_CREACION is interpreted using the declared source timezone when it is NTZ.
     return datetime.fromisoformat(value.replace('Z', '+00:00')).astimezone(
-        ZoneInfo(os.environ.get('SNOWFLAKE_SOURCE_TIMEZONE', 'UTC'))
+        source_timezone()
     ).replace(tzinfo=None)
 
 
@@ -96,20 +107,24 @@ def verified_columns(connection):
     return columns
 
 
-def list_customers(connection, cutoff, query=''):
+def list_customers(connection, cutoff, query='', offset=0):
+    if not isinstance(offset, int) or not 0 <= offset <= 1000000:
+        raise SourceError('MISSING_CONFIGURATION', 'La página de clientes no es válida.', 400)
     verified_columns(connection)
     with connection.cursor() as cursor:
         cursor.execute(f'''
-            SELECT TO_VARCHAR(ID_CLIENTE), COUNT(*), MAX(FECHA_CREACION)
+            SELECT TO_VARCHAR(ID_CLIENTE), COUNT(*), MAX(FECHA_CREACION), COUNT(*) OVER() AS TOTAL_CUSTOMERS
             FROM {table_name()}
             WHERE FECHA_CREACION <= %s AND ID_CLIENTE IS NOT NULL
               AND DESCRIPCION_ES IS NOT NULL
               AND STARTSWITH(UPPER(TO_VARCHAR(ID_CLIENTE)), UPPER(%s))
-            GROUP BY ID_CLIENTE ORDER BY MAX(FECHA_CREACION) DESC, ID_CLIENTE LIMIT 25
-        ''', (cutoff_value(cutoff), query))
+            GROUP BY ID_CLIENTE ORDER BY MAX(FECHA_CREACION) DESC, ID_CLIENTE LIMIT 26 OFFSET %s
+        ''', (cutoff_value(cutoff), query, offset))
         rows, query_id = cursor.fetchall(), cursor.sfqid
     return {'mode': 'live', 'source': table_name(), 'queryId': query_id,
-            'customers': [{'customerId': str(row[0]), 'ticketCount': int(row[1]), 'lastTicketAt': iso(row[2])} for row in rows]}
+            'scope': 'customers_with_tickets', 'offset': offset, 'pageSize': 25,
+            'total': int(rows[0][3]) if rows else 0, 'hasMore': len(rows) > 25,
+            'customers': [{'customerId': str(row[0]), 'ticketCount': int(row[1]), 'lastTicketAt': iso(row[2])} for row in rows[:25]]}
 
 
 def invoice_evidence(connection, customer_id, cutoff):
@@ -141,7 +156,7 @@ def invoice_evidence(connection, customer_id, cutoff):
         amount = Decimal(str(row[4]))
         if not amount.is_finite() or amount < 0:
             raise SourceError('INVALID_INVOICE', 'Hay importes de factura inválidos para comparar cargos.')
-        invoices.append({'id': f'SF-INVOICE:{row[0]}', 'occurredAt': iso(row[3]), 'availableAt': iso(row[3]),
+        invoices.append({'id': f'SF-INVOICE:{row[0]}', 'sourceId': str(row[0]), 'sourceIdColumn': 'ID_FACTURA', 'occurredAt': iso(row[3]), 'availableAt': iso(row[3]),
                          'source': table, 'serviceId': str(row[1]), 'period': str(row[2]),
                          'chargeCode': 'INVOICE_TOTAL', 'amountMinor': int((amount * 100).quantize(Decimal('1'), rounding=ROUND_HALF_UP)), 'currency': 'BOB'})
     if len({item['id'] for item in invoices}) != len(invoices):
@@ -172,7 +187,7 @@ def case_snapshot(connection, customer_id, cutoff):
         rows, query_id = cursor.fetchall(), cursor.sfqid
     if not rows:
         raise SourceError('CASE_NOT_FOUND', 'No hay tickets para ese cliente hasta el corte seleccionado.', 404)
-    tickets = [{'id': f'SF-TICKET:{row[0]}', 'occurredAt': iso(row[1]), 'availableAt': iso(row[3]),
+    tickets = [{'id': f'SF-TICKET:{row[0]}', 'sourceId': str(row[0]), 'sourceIdColumn': 'ID_TICKET', 'occurredAt': iso(row[1]), 'availableAt': iso(row[3]),
                 'source': table_name(), 'text': str(row[2])[:10000]} for row in rows[:200]]
     if len({t['id'] for t in tickets}) != len(tickets):
         raise SourceError('DUPLICATE_TICKET_IDS', 'La fuente contiene IDs de ticket repetidos; se necesita una clave de evidencia única.')

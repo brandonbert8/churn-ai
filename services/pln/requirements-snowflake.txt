@@ -1,2 +1,5 @@
 # Official connector; installed in the same .venv-pln environment.
 snowflake-connector-python>=3.12,<6
+
+# IANA time zones on Windows for non-UTC source timestamps.
+tzdata>=2025.2
