@@ -6,11 +6,11 @@ import { cookies } from 'next/headers'
 import { accessAllowed } from '@/lib/retention-access'
 import { z } from 'zod'
 import { mastra } from '@/mastra'
-import { scopeSchema } from '@/mastra/retention/contracts'
-import { dataMode, DataSourceError, RetentionCase } from '@/mastra/retention/service'
+import { conversationScopeSchema, RetentionWorkspace } from '@/mastra/retention/workspace'
+import { dataMode, DataSourceError } from '@/mastra/retention/service'
 
 const bodySchema = z.object({
-  ...scopeSchema.shape,
+  ...conversationScopeSchema.shape,
   messages: z.array(z.object({
     id: z.string().min(1).max(100), role: z.enum(['user', 'assistant']),
     parts: z.array(z.unknown()).max(100),
@@ -27,16 +27,16 @@ async function session() {
   }
   return id
 }
-function memoryScope(id: string, scope: z.infer<typeof scopeSchema>) {
-  return { resource: id, thread: `${id}:${dataMode()}:${scope.customerId}:${new Date(scope.cutoff).toISOString()}` }
+function memoryScope(id: string, scope: z.infer<typeof conversationScopeSchema>) {
+  return { resource: id, thread: `${id}:${dataMode()}:${scope.customerId ?? 'general'}:${new Date(scope.cutoff).toISOString()}` }
 }
 
 export async function POST(request: Request) {
-  if (!accessAllowed(request)) return Response.json({ error: 'Acceso no autorizado al modo live.' }, { status: 401 })
+  if (!accessAllowed(request)) return Response.json({ error: 'Esta aplicación está disponible solo en localhost.' }, { status: 401 })
   if (!process.env.OPENROUTER_API_KEY) return Response.json({ error: 'Falta OPENROUTER_API_KEY en el servidor.' }, { status: 503 })
   try {
     const parsed = bodySchema.safeParse(await request.json())
-    if (!parsed.success) return Response.json({ error: 'Selecciona un caso, corte y mensaje válidos.' }, { status: 400 })
+    if (!parsed.success) return Response.json({ error: 'Escribe un mensaje válido.' }, { status: 400 })
     const { customerId, cutoff, messages } = parsed.data
     // Only the last user text is accepted. History/tool results come from server memory.
     const latest = messages.at(-1)
@@ -44,10 +44,9 @@ export async function POST(request: Request) {
     const parts = latest.parts.map(part => textSchema.parse(part))
     if (!parts.length) return Response.json({ error: 'Mensaje vacío.' }, { status: 400 })
     const scope = { customerId, cutoff }
-    const current = new RetentionCase(scope)
-    await current.load()
+    const workspace = new RetentionWorkspace(cutoff, customerId)
     const requestContext = new RequestContext()
-    requestContext.set('retentionCase', current)
+    requestContext.set('retentionWorkspace', workspace)
     const stream = await handleChatStream({
       mastra, agentId: 'retention-agent', version: 'v7', sendReasoning: false,
       params: {
@@ -57,7 +56,7 @@ export async function POST(request: Request) {
       },
       onError: () => 'No se pudo completar la investigación. Revisa la conexión e inténtalo de nuevo.',
     })
-    return createUIMessageStreamResponse({ stream, headers: { 'Cache-Control': 'no-store' } })
+    return createUIMessageStreamResponse({ stream, headers: { 'Cache-Control': 'no-store, no-transform', 'X-Accel-Buffering': 'no' } })
   } catch (error) {
     if (error instanceof DataSourceError) return Response.json({ error: error.message }, { status: error.status })
     const invalid = error instanceof z.ZodError || error instanceof SyntaxError
@@ -66,10 +65,10 @@ export async function POST(request: Request) {
 }
 
 export async function GET(request: Request) {
-  if (!accessAllowed(request)) return Response.json({ error: 'Acceso no autorizado al modo live.' }, { status: 401 })
+  if (!accessAllowed(request)) return Response.json({ error: 'Esta aplicación está disponible solo en localhost.' }, { status: 401 })
   const query = Object.fromEntries(new URL(request.url).searchParams)
-  const parsed = scopeSchema.safeParse(query)
-  if (!parsed.success) return Response.json({ error: 'Caso y corte requeridos.' }, { status: 400 })
+  const parsed = conversationScopeSchema.safeParse(query)
+  if (!parsed.success) return Response.json({ error: 'Contexto de conversación inválido.' }, { status: 400 })
   const scope = memoryScope(await session(), parsed.data)
   const memory = await mastra.getAgentById('retention-agent').getMemory()
   const existing = await memory?.getThreadById({ threadId: scope.thread })

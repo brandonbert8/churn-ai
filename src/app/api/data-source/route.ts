@@ -14,5 +14,5 @@ export async function GET() {
       }
     }
   } catch { /* Report service availability without leaking connection details. */ }
-  return Response.json({ defaultCutoff: new Date().toISOString(), mode: dataMode(), authenticationRequired: dataMode() === 'live', serviceAvailable: pln !== null, pln }, { headers: { 'Cache-Control': 'no-store' } })
+  return Response.json({ defaultCutoff: new Date().toISOString(), mode: dataMode(), authenticationRequired: false, serviceAvailable: pln !== null, pln }, { headers: { 'Cache-Control': 'no-store' } })
 }
