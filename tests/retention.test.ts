@@ -125,3 +125,12 @@ test('only sanitized gateway configuration errors reach the UI', async () => {
   const unknown: typeof fetch = async () => Response.json({ detail: { code: 'UNEXPECTED', message: 'private connection details' } }, { status: 500 })
   await assert.rejects(evidenceRequest('customers', undefined, undefined, unknown), (error: unknown) => error instanceof DataSourceError && !error.message.includes('private'))
 })
+
+
+test('local service network errors are actionable and never blamed on Snowflake', async () => {
+  process.env.CHURN_EVIDENCE_API_URL = 'http://127.0.0.1:8001'
+  const disconnected: typeof fetch = async () => { throw new TypeError('fetch failed') }
+  await assert.rejects(evidenceRequest('customers', undefined, undefined, disconnected), (error: unknown) => error instanceof DataSourceError && error.status === 503 && error.message.includes('pnpm dev') && !error.message.includes('Snowflake'))
+  const timeout: typeof fetch = async () => { throw new DOMException('timeout', 'TimeoutError') }
+  await assert.rejects(evidenceRequest('customers', undefined, undefined, timeout), (error: unknown) => error instanceof DataSourceError && error.message.includes('tardó demasiado'))
+})

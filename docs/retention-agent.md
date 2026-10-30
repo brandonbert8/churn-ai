@@ -40,7 +40,7 @@ Alternativas de autenticación soportadas por el conector:
 - Clave privada: `SNOWFLAKE_AUTHENTICATOR=SNOWFLAKE_JWT`, `SNOWFLAKE_PRIVATE_KEY_FILE` y, si está cifrada, `SNOWFLAKE_PRIVATE_KEY_PASSWORD`.
 - OAuth: `SNOWFLAKE_AUTHENTICATOR=oauth` y `SNOWFLAKE_TOKEN`.
 
-`CHURN_APP_TOKEN` protege la API del asesor en modo live. Introducir su valor en el campo de acceso antes de consultar clientes. `CHURN_EVIDENCE_API_TOKEN` autentica Next.js ante el servicio local. Son secretos distintos; la configuración local generó ambos sin imprimirlos. El acceso compartido actual es para un operador: una aplicación multiusuario requiere SSO y autorización por cliente/tenant.
+La aplicación está pensada para uso local en la laptop: el chat y el catálogo funcionan en localhost sin autenticación del asesor. Los comandos de inicio escuchan solo en `127.0.0.1` y la API rechaza hosts remotos y orígenes distintos. `CHURN_EVIDENCE_API_TOKEN` autentica internamente Next.js ante el servicio PLN y no se solicita en la interfaz.
 
 ## Instalación e inicio
 
@@ -84,3 +84,17 @@ La prueba completa de `POST /api/chat` finalizó con HTTP 200 y stream terminado
 La compilación de producción `pnpm build` terminó correctamente con Webpack, Tailwind/PostCSS y las bibliotecas nativas de LibSQL externas al empaquetado. Pasaron las nueve pruebas TypeScript, seis pruebas del adaptador Snowflake y dos de inferencia HTTP con el modelo local. La interfaz también se verificó consultando clientes y recibiendo la síntesis del caso real.
 
 Fuentes: [conexión oficial Python](https://docs.snowflake.com/en/developer-guide/python-connector/python-connector-connect), [consultas con parámetros](https://docs.snowflake.com/en/developer-guide/python-connector/python-connector-example), [herramientas Mastra](https://mastra.ai/docs/agents/tools).
+
+## Paginación y trazabilidad
+
+`GET /customers` y `/api/customers` aceptan `offset` (0, 25, 50, etc.). Devuelven `total`, `pageSize`, `hasMore`, `source` y `queryId`. El universo son clientes con tickets y descripción hasta el corte, no toda la tabla maestra.
+
+Cada ticket y factura live conserva `sourceId` y `sourceIdColumn`, con el identificador original de Snowflake. El campo `id` conserva la referencia interna para validar evidencias (`SF-TICKET:` o `SF-INVOICE:`). `/api/customers/{customerId}/evidence?cutoff=...` muestra únicamente referencias y metadatos del caso, sin enviar registros a un modelo.
+
+## Ranking agregado de reclamos
+
+La herramienta `rankCustomersByComplaints` consulta `POST /customer-ranking` con el corte fijado por el servidor. Parámetros: `limit` (1–50, por defecto 10), `metric` (`complaints` o `tickets`), `minTickets`, `lookbackDays` (null = todo el historial) y `activeOnly` (true por defecto). SQL agrupa toda la fuente antes de limitar; no clasifica la primera página del catálogo.
+
+Se cuentan IDs distintos de tickets. `complaints` usa CATEGORIA = reclamacion, sin distinguir mayúsculas; las demás categorías se incluyen solo en el conteo de tickets totales. Se unen los IDs de la fuente de tickets con `SNOWFLAKE_CUSTOMERS_TABLE` (predeterminada `DBT.ORO.DIM_CLIENTES`). El filtro activo excluye bajas históricas conocidas al corte, sin convertir CHURN en riesgo futuro.
+
+La respuesta incluye cliente, nombre original si existe, conteos, último ticket, cobertura de fechas, tablas y Query IDs. En las fuentes actuales no hay nombres ni predictor validado: `customerName` y `churnProbability` son null. La priorización por reclamos no demuestra una mayor probabilidad de abandono. No se calcula una probabilidad a partir del PLN, tasas históricas ni conteos.
